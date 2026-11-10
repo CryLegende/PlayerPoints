@@ -4,9 +4,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import org.black_ixx.playerpoints.PlayerPoints;
 import org.black_ixx.playerpoints.config.SettingKey;
 import org.black_ixx.playerpoints.manager.DataManager;
@@ -19,7 +16,8 @@ import org.bukkit.entity.Player;
  *   <li>a player leaving a server: his pending transactions are written before the next server reads him
  *       (SHNetwork save task);</li>
  *   <li>a player joining a server: his points are read once the server he comes from wrote them
- *       ({@code awaitSaved}), so a balance spent there can't be spent again here;</li>
+ *       ({@code awaitSaved}, never waited for during the login), so a balance spent there can't be spent again here;
+ *       until then his balance is unknown: it reads as 0 and can't be spent;</li>
  *   <li>after each write, the other servers read that player again (SHNetwork bus, which reaches every server,
  *       instead of the BungeeCord message that needs a player online on both sides).</li>
  * </ul>
@@ -68,18 +66,19 @@ public final class PointsNetwork {
     }
 
     /**
-     * AsyncPlayerPreLogin: holds this login thread until the server the player comes from wrote his points.
+     * AsyncPlayerPreLogin: never waits here. The server the player comes from only writes his points once the proxy
+     * closed its connection, which happens after this login is over: waiting on this thread would hold the login until
+     * the maximum wait. {@code then} runs once that server wrote them (or the wait ran out), on a SHNetwork thread that
+     * must not be blocked: it only hands the read over to another thread.
      */
-    public void awaitSaved(UUID uuid, String name) {
-        try {
-            Boolean saved = this.link.awaitSaved(uuid, this.waitMillis).get(this.waitMillis + 2000L, TimeUnit.MILLISECONDS);
-            if (!Boolean.TRUE.equals(saved))
+    public void whenSaved(UUID uuid, String name, Runnable then) {
+        this.link.awaitSaved(uuid, this.waitMillis).whenComplete((saved, error) -> {
+            if (error != null)
+                this.plugin.getLogger().warning("Departure of " + name + " not confirmed (" + error + "): points read anyway");
+            else if (!Boolean.TRUE.equals(saved))
                 this.plugin.getLogger().warning("Departure of " + name + " not confirmed by the server he comes from: points read anyway");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException e) {
-            this.plugin.getLogger().warning("Departure of " + name + " not confirmed (" + e + "): points read anyway");
-        }
+            then.run();
+        });
     }
 
     /**

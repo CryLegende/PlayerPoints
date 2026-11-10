@@ -69,6 +69,11 @@ public class DataManager extends AbstractDataManager implements Listener {
     private boolean logTransactions;
     /** Writes go one at a time: a player's last write before he leaves runs after any write already started. */
     private final Object writeLock = new Object();
+    /**
+     * Network mode: players whose points are being read once the server they come from wrote them (value = this
+     * arrival's token). Their balance is unknown until then: it reads as 0 and can't be spent.
+     */
+    private final Map<UUID, Object> arriving = new ConcurrentHashMap<>();
 
     public DataManager(RosePlugin rosePlugin) {
         super(rosePlugin);
@@ -215,7 +220,7 @@ public class DataManager extends AbstractDataManager implements Listener {
      * Network mode: another server wrote this player's points; read them again if this server holds them.
      */
     public void refreshIfCached(UUID uuid) {
-        if (this.pointsCache.getIfPresent(uuid) != null)
+        if (!this.arriving.containsKey(uuid) && this.pointsCache.getIfPresent(uuid) != null)
             this.refreshPoints(uuid);
     }
 
@@ -252,12 +257,45 @@ public class DataManager extends AbstractDataManager implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerPreLogin(AsyncPlayerPreLoginEvent event) {
         if (event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED) {
-            // Network mode: read once the server the player comes from wrote his points
+            // Network mode: read once the server the player comes from wrote his points, without waiting here (the
+            // proxy closes the old connection only after this login, so that server can't have saved before it ends)
             PointsNetwork network = PlayerPoints.getInstance().getNetwork();
-            if (network != null)
-                network.awaitSaved(event.getUniqueId(), event.getName());
+            if (network != null) {
+                this.beginArrival(network, event.getUniqueId(), event.getName());
+                return;
+            }
 
             this.pointsCache.put(event.getUniqueId(), this.getPoints(event.getUniqueId()));
+        }
+    }
+
+    /**
+     * Network mode: the player's points are read as soon as the server he comes from wrote them; until then they are
+     * unknown (see {@link #arriving}).
+     */
+    private void beginArrival(PointsNetwork network, UUID uuid, String name) {
+        Object token = new Object();
+        this.arriving.put(uuid, token);
+        // a value kept from an earlier visit here may be outdated
+        this.pointsCache.invalidate(uuid);
+        network.whenSaved(uuid, name, () -> {
+            try {
+                this.rosePlugin.getScheduler().runTaskAsync(() -> this.readArrival(uuid, token));
+            } catch (Exception stopping) {
+                // plugin stopping: nothing reads this player any more
+                this.arriving.remove(uuid, token);
+            }
+        });
+    }
+
+    private void readArrival(UUID uuid, Object token) {
+        // after any write already running: its read-back of the points must not overwrite this fresher read
+        synchronized (this.writeLock) {
+            if (this.arriving.get(uuid) != token)
+                return; // he came back since: that arrival reads him
+
+            this.pointsCache.put(uuid, this.getPoints(uuid));
+            this.arriving.remove(uuid, token);
         }
     }
 
@@ -285,11 +323,16 @@ public class DataManager extends AbstractDataManager implements Listener {
     private int getEffectivePoints(UUID playerId, Deque<PendingTransaction> transactions, Integer points) {
         // Get the cached amount or fetch it fresh from the database
         if (points == null) {
-            try {
-                points = this.pointsCache.get(playerId);
-            } catch (ExecutionException e) {
-                e.printStackTrace();
+            if (this.arriving.containsKey(playerId)) {
+                // Network mode: still being read once the other server wrote them, nothing to spend yet
                 points = 0;
+            } else {
+                try {
+                    points = this.pointsCache.get(playerId);
+                } catch (ExecutionException e) {
+                    e.printStackTrace();
+                    points = 0;
+                }
             }
         }
 
