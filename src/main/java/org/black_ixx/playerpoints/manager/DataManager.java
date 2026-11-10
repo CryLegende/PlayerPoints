@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutionException;
@@ -37,6 +38,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.black_ixx.playerpoints.PlayerPoints;
 import org.black_ixx.playerpoints.config.SettingKey;
 import org.black_ixx.playerpoints.database.migrations._1_Create_Tables;
 import org.black_ixx.playerpoints.database.migrations._2_Add_Table_Username_Cache;
@@ -46,6 +48,7 @@ import org.black_ixx.playerpoints.models.PendingTransaction;
 import org.black_ixx.playerpoints.models.SortedPlayer;
 import org.black_ixx.playerpoints.models.TransactionType;
 import org.black_ixx.playerpoints.models.UpdateType;
+import org.black_ixx.playerpoints.network.PointsNetwork;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -64,6 +67,8 @@ public class DataManager extends AbstractDataManager implements Listener {
     private final Set<String> allAccountNames;
     private boolean isModernSqlite;
     private boolean logTransactions;
+    /** Writes go one at a time: a player's last write before he leaves runs after any write already started. */
+    private final Object writeLock = new Object();
 
     public DataManager(RosePlugin rosePlugin) {
         super(rosePlugin);
@@ -142,22 +147,84 @@ public class DataManager extends AbstractDataManager implements Listener {
      * Pushes any pending points changes to the database
      */
     private void update() {
-        // Push any points changes to the database
-        Map<UUID, Deque<PendingTransaction>> processingPendingTransactions;
-        synchronized (this.pendingTransactions) {
-            if (this.pendingTransactions.isEmpty())
-                return;
+        synchronized (this.writeLock) {
+            // Push any points changes to the database
+            Map<UUID, Deque<PendingTransaction>> processingPendingTransactions;
+            synchronized (this.pendingTransactions) {
+                if (this.pendingTransactions.isEmpty())
+                    return;
 
-            processingPendingTransactions = new HashMap<>(this.pendingTransactions);
-            this.pendingTransactions.clear();
+                processingPendingTransactions = new HashMap<>(this.pendingTransactions);
+                this.pendingTransactions.clear();
+            }
+
+            this.updatePoints(processingPendingTransactions);
+
+            if (!this.pendingUsernameUpdates.isEmpty()) {
+                this.updateCachedUsernames(this.pendingUsernameUpdates);
+                this.pendingUsernameUpdates.clear();
+            }
+        }
+    }
+
+    /**
+     * Network mode: writes the pending transactions of a player leaving this server, after any write already running.
+     *
+     * @param uuid The player's UUID
+     * @return completes once the database has them
+     */
+    public CompletableFuture<Void> flush(UUID uuid) {
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        Runnable write = () -> {
+            try {
+                synchronized (this.writeLock) {
+                    Deque<PendingTransaction> transactions;
+                    synchronized (this.pendingTransactions) {
+                        transactions = this.pendingTransactions.remove(uuid);
+                    }
+                    if (transactions != null && !transactions.isEmpty())
+                        this.updatePoints(Collections.singletonMap(uuid, transactions));
+                }
+                done.complete(null);
+            } catch (Throwable e) {
+                done.completeExceptionally(e);
+            }
+        };
+
+        if (this.rosePlugin.isEnabled()) {
+            try {
+                this.rosePlugin.getScheduler().runTaskAsync(write);
+                return done;
+            } catch (Exception ignored) {
+                // plugin stopping: written right here
+            }
         }
 
-        this.updatePoints(processingPendingTransactions);
+        write.run();
+        return done;
+    }
 
-        if (!this.pendingUsernameUpdates.isEmpty()) {
-            this.updateCachedUsernames(this.pendingUsernameUpdates);
-            this.pendingUsernameUpdates.clear();
-        }
+    /**
+     * @return true when the points are in a database other servers can share (MySQL), false with SQLite
+     */
+    public boolean isSharedDatabase() {
+        return !(this.databaseConnector instanceof SQLiteConnector);
+    }
+
+    /**
+     * Network mode: another server wrote this player's points; read them again if this server holds them.
+     */
+    public void refreshIfCached(UUID uuid) {
+        if (this.pointsCache.getIfPresent(uuid) != null)
+            this.refreshPoints(uuid);
+    }
+
+    /**
+     * Network mode: another server offset every account; read again all the points this server holds.
+     */
+    public void refreshAllCached() {
+        for (UUID uuid : new ArrayList<>(this.pointsCache.asMap().keySet()))
+            this.refreshPoints(uuid);
     }
 
     private void updateAccountUUIDMaps() {
@@ -184,8 +251,14 @@ public class DataManager extends AbstractDataManager implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerPreLogin(AsyncPlayerPreLoginEvent event) {
-        if (event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED)
+        if (event.getLoginResult() == AsyncPlayerPreLoginEvent.Result.ALLOWED) {
+            // Network mode: read once the server the player comes from wrote his points
+            PointsNetwork network = PlayerPoints.getInstance().getNetwork();
+            if (network != null)
+                network.awaitSaved(event.getUniqueId(), event.getName());
+
             this.pointsCache.put(event.getUniqueId(), this.getPoints(event.getUniqueId()));
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -387,8 +460,13 @@ public class DataManager extends AbstractDataManager implements Listener {
                     }
                 }
 
+                // Network mode: every other server reads this player again (replaces the BungeeCord message)
+                PointsNetwork network = PlayerPoints.getInstance().getNetwork();
+                if (network != null) {
+                    network.changed(uuid);
+                }
                 // Send update to BungeeCord if enabled
-                if (org.black_ixx.playerpoints.config.SettingKey.BUNGEECORD_SEND_UPDATES.get() && this.rosePlugin.isEnabled()) {
+                else if (org.black_ixx.playerpoints.config.SettingKey.BUNGEECORD_SEND_UPDATES.get() && this.rosePlugin.isEnabled()) {
                     ByteArrayDataOutput output = ByteStreams.newDataOutput();
                     output.writeUTF("Forward");
                     output.writeUTF("ONLINE");
@@ -421,6 +499,10 @@ public class DataManager extends AbstractDataManager implements Listener {
 
         for (Player player : Bukkit.getOnlinePlayers())
             this.pointsCache.put(player.getUniqueId(), this.getPoints(player.getUniqueId()));
+
+        PointsNetwork network = PlayerPoints.getInstance().getNetwork();
+        if (network != null)
+            network.changedAll();
     }
 
     public boolean doesDataExist() {

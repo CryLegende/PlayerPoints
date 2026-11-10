@@ -6,7 +6,7 @@ description: A point based currency system
 main: org.black_ixx.playerpoints.PlayerPoints
 api-version: '1.13'
 load: STARTUP
-softdepend: [Vault, Treasury, Votifier, PlaceholderAPI, TokenManager, GamePoints, NexEngine]
+softdepend: [Vault, Treasury, Votifier, PlaceholderAPI, TokenManager, GamePoints, NexEngine, SHNetwork]
 loadbefore: [mcMMO]
 folia-supported: true
 libraries:

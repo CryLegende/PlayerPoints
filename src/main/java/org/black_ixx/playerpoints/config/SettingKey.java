@@ -38,6 +38,14 @@ public class SettingKey implements SettingHolder {
     public static final RoseSetting<ConfigurationSection> LEGACY_DATABASE = create("legacy-database-mode", "Are you upgrading from a much older version of PlayerPoints?", "If you have done anything special with the database settings previously, you may need this", "WARNING: This setting may be removed in the future. Try to get your database updated to use the new format!");
     public static final RoseSetting<Boolean> LEGACY_DATABASE_MODE = create("legacy-database-mode.enabled", BOOLEAN, false, "Should we use legacy database mode?");
     public static final RoseSetting<String> LEGACY_DATABASE_NAME = create("legacy-database-mode.table-name", STRING, "playerpoints", "The name of the legacy database table");
+    public static final RoseSetting<ConfigurationSection> NETWORK = create("reseau",
+            "Mode réseau, quand SHNetwork relie plusieurs serveurs qui partagent la même base MySQL (mysql-settings).",
+            "Sans SHNetwork, ou en SQLite, rien ne change.",
+            "- au départ d'un joueur, ses points en attente sont écrits avant que le serveur suivant ne les lise ;",
+            "- à l'arrivée, ses points sont lus une fois cette écriture finie ;",
+            "- après chaque écriture, les autres serveurs relisent ce joueur (bus de SHNetwork, à la place du message BungeeCord).");
+    public static final RoseSetting<Boolean> NETWORK_ENABLED = create("reseau.actif", BOOLEAN, true, "false pour garder chaque serveur indépendant même avec SHNetwork (lu au démarrage)");
+    public static final RoseSetting<Integer> NETWORK_WAIT = create("reseau.attente-max", INTEGER, 10, "Attente maximale, en secondes, de l'écriture du serveur de départ (au-delà, les points sont lus quand même)");
 
     private static <T> RoseSetting<T> create(String key, SettingSerializer<T> serializer, T defaultValue, String... comments) {
         RoseSetting<T> setting = RoseSetting.ofBackedValue(key, PlayerPoints.getInstance(), serializer, defaultValue, comments);

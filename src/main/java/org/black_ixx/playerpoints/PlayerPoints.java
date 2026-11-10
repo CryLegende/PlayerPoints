@@ -18,9 +18,13 @@ import org.black_ixx.playerpoints.manager.ConversionManager;
 import org.black_ixx.playerpoints.manager.DataManager;
 import org.black_ixx.playerpoints.manager.LeaderboardManager;
 import org.black_ixx.playerpoints.manager.LocaleManager;
+import org.black_ixx.playerpoints.network.PointsNetwork;
 import org.black_ixx.playerpoints.treasury.PlayerPointsTreasuryLayer;
 import org.black_ixx.playerpoints.util.PointsUtils;
 import org.bukkit.Bukkit;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServerLoadEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.ServicePriority;
 import org.jetbrains.annotations.Nullable;
@@ -34,6 +38,7 @@ public class PlayerPoints extends RosePlugin {
     private final PlayerPointsAPI api;
     private PlayerPointsVaultLayer vaultLayer;
     private PlayerPointsTreasuryLayer treasuryLayer;
+    private volatile PointsNetwork network;
 
     public PlayerPoints() {
         super(80745, 10234, DataManager.class, LocaleManager.class, CommandManager.class);
@@ -92,6 +97,19 @@ public class PlayerPoints extends RosePlugin {
             Bukkit.getMessenger().registerIncomingPluginChannel(this, PointsMessageListener.CHANNEL, new PointsMessageListener(this));
         }
 
+        // Network mode: SHNetwork enables after this plugin (load: STARTUP), so it starts once every plugin is enabled
+        if (Bukkit.getPluginManager().isPluginEnabled("SHNetwork")) {
+            this.network = PointsNetwork.open(this);
+        } else {
+            Bukkit.getPluginManager().registerEvents(new Listener() {
+                @EventHandler
+                public void onServerLoad(ServerLoadEvent event) {
+                    if (PlayerPoints.this.network == null && PlayerPoints.this.isEnabled())
+                        PlayerPoints.this.network = PointsNetwork.open(PlayerPoints.this);
+                }
+            }, this);
+        }
+
         this.getScheduler().runTask(() -> {
             // Register placeholders, if applicable
             if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI"))
@@ -111,6 +129,8 @@ public class PlayerPoints extends RosePlugin {
 
     @Override
     public void disable() {
+        this.network = null;
+
         if (this.vaultLayer != null)
             Bukkit.getServicesManager().unregister(Economy.class, this.vaultLayer);
 
@@ -156,6 +176,14 @@ public class PlayerPoints extends RosePlugin {
 
     public static PlayerPoints getInstance() {
         return instance;
+    }
+
+    /**
+     * @return the network mode (SHNetwork), or null when it's off
+     */
+    @Nullable
+    public PointsNetwork getNetwork() {
+        return this.network;
     }
 
     /**

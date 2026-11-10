@@ -7,7 +7,7 @@ plugins {
 }
 
 group = 'org.black_ixx'
-version = '3.3.5'
+version = '3.3.5-sh1'
 
 java {
     sourceCompatibility = 1.8
@@ -17,6 +17,10 @@ java {
 
 repositories {
     mavenCentral()
+    // SHNetwork API (mvn install in SkyHand/Plugins/SHNetwork), network mode only
+    mavenLocal {
+        content { includeGroup 'org.Cry_Legende' }
+    }
 
     maven { url = 'https://repo.rosewooddev.io/repository/public/' }
     maven { url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' }
@@ -43,6 +47,7 @@ dependencies {
     compileOnly 'su.nexmedia:nexengine:2.2.0'
     compileOnly 'com.willfp:eco:6.75.2'
     compileOnly 'com.willfp:EcoBits:1.8.4'
+    compileOnly('org.Cry_Legende:SHNetwork:1.0') { transitive = false }
 }
 
 compileJava {
